@@ -1,0 +1,296 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use Getopt::Long qw(:config require_order pass_through bundling);
+use JSON;
+use Term::ProgressBar;
+use Time::HiRes;
+
+sub print_usage {
+    my $message = $_[0];
+    if (defined($message)) {
+        print $message;
+        if ($message !~ /^\n{0,1,2}$/) {
+            print "\n\n";
+        }
+    }
+
+    my $self = $0;
+    $self =~ s%^.*/%%;
+
+    print <<EOF;
+Usage: $self [-o OUTPUT] [INPUT]
+
+Queries boxbackup for a full file listing and feeds it into `ncdu' to visualize
+the disk usage on the backup server.
+
+To execute `bbackupquery', boxdu usually requires to be run with root
+privileges. This is not the case if an input file containing a previously
+created file listing is provided.
+
+If a JSON export is requested using --output, `ncdu' will not be executed. Use `ncdu
+-f <OUTPUT>' to examine the exported data.
+
+Available options:
+    -o FILE, --output FILE      Export JSON data to FILE
+    -v, --verbose               Be verbose
+    -d, --debug                 Debug output (execution time measurements)
+    -q, --quiet                 Suppress progress indication
+    -h, --help                  Print this help
+EOF
+
+    exit(1);
+}
+
+
+my ($output, $verbose, $debug, $quiet, $help, $directory, $bbackupquery_path, $ncdu_path);
+GetOptions(
+    'o|output=s'    => \$output,
+    'v|verbose'     => \$verbose,
+    'd|debug'       => \$debug,
+    'q|quiet'       => \$quiet,
+    'h|help'        => \$help,
+) or print_usage();
+
+if ($help) {
+    print_usage();
+}
+
+sub verbose {
+    print STDERR @_ if $verbose;
+}
+
+my $times = {};
+sub start {
+    $times->{$_[0]} -= Time::HiRes::gettimeofday();
+}
+sub end {
+    $times->{$_[0]} += Time::HiRes::gettimeofday();
+}
+
+# Obtain file listing from boxbackup server
+my @filelist;
+
+my $input = $ARGV[0];
+my $inputfh;
+if (defined($ARGV[0])) {
+    # Input file is given
+    if ($input eq '-') {
+        verbose("Reading file listing from standard input\n");
+        open($inputfh, '<-')
+            or die("Failed to open standard input for reading: $!");
+    } else {
+        verbose("Reading input from `$input'\n");
+        open($inputfh, '<', $input)
+            or die("boxdu: open: $input: $!");
+    }
+} else {
+    # No input specified, run bbackupquery ourselves
+    my @cmd = ('/usr/sbin/bbackupquery',  'list -r -d -o -s', 'quit');
+    verbose("Running command: " . join(' ', @cmd) . "\n");
+    open($inputfh, '-|', @cmd)
+        or die("Failed to run bbackupquery");
+}
+
+@filelist = <$inputfh>;
+close($inputfh);
+
+# Skip well-known header lines in bbackupquery output
+sub veriline {
+    my $listref = shift;
+    my $regex = shift;
+    my $linenum = shift;
+    if (@$listref[0] =~ m/$regex/) {
+        shift(@$listref);
+    } else {
+        die("Unexpected input in line $linenum");
+    }
+}
+
+my $linenum = 1;
+veriline(\@filelist, '^NOTICE:', $linenum++);
+veriline(\@filelist, '^Login complete.$', $linenum++);
+veriline(\@filelist, '^$', $linenum++);
+veriline(\@filelist, '^Type "help"', $linenum++);
+veriline(\@filelist, '^$', $linenum++);
+
+my $roots = {
+    'current' => {},
+    'deleted' => {},
+    'old' => {}
+};
+
+my $joblength = $#filelist;
+my $progress = Term::ProgressBar->new({name => 'Parsing', count => $joblength, ETA => 'linear'});
+$progress->minor(0);
+my $progress_nextupdate = 0;
+
+start('parse') if $debug;
+for (my $i = 0; $i <= $#filelist; $i++) {
+    if (!$quiet && $i >= $progress_nextupdate) {
+        $progress_nextupdate = $progress->update($i);
+    }
+
+    # print "filelist: " . $filelist[$i];
+    chomp($filelist[$i]);
+    my ($id, $flags, $size, $path) = split(/ /, $filelist[$i], 4);
+    # print "id=$id, flags=$flags, size=$size, path=$path\n";
+    my @dirs = split(/\//, $path);
+
+    my $root = 'current';
+    if ($flags =~ /X/) {
+        $root = 'deleted';
+    } elsif ($flags =~ /o/) {
+        $root = 'old';
+    }
+
+    if ($flags =~ /R/) {
+        print "has flag R: $path\n";
+    }
+
+    if ($size == 0) {
+        # skip directories (and empty files?)
+        next;
+    }
+
+    # traverse hash for all but last directory tokens in given path
+    start('traverse') if $debug;
+    my $tmp = $roots->{$root};
+    for (my $d = 0; $d < $#dirs; $d++) {
+        my $dir = $dirs[$d];
+        if (!exists($tmp->{$dir})) {
+            $tmp->{$dir} = {};
+        }
+        $tmp = $tmp->{$dir};
+    }
+    end('traverse') if $debug;
+
+    if (exists($tmp->{$dirs[-1]})) {
+        if (ref($tmp->{$dirs[-1]}) eq 'HASH') {
+            print STDERR "Hash reference unexpectedly found a leaf node in tree '$root': $path\n";
+            next;
+        }
+        if ($root eq 'current') {
+            print STDERR "Path collision with previously seen file in tree '$root': $path\n";
+            next;
+        }
+    } else {
+        # initialize
+        $tmp->{$dirs[-1]} = 0;
+    }
+
+    # leaf node points to file size (build cumulative sum in case of deleted or old versions)  
+    $tmp->{$dirs[-1]} += $size * 4096;
+}
+
+end('parse') if $debug;
+$progress->update($joblength) unless $quiet;
+use Data::Dumper;
+
+my $outputfh;
+if (defined($output)) {
+    # Write JSON to file
+    verbose("Writing JSON to `$output'\n");
+    open($outputfh, '>', $output)
+        or die("boxdu: open: $output: $!");
+} else {
+    # Feed JSON to ncdu
+    die("Not implemented yet");
+}
+
+
+# print tree in JSON format
+my @stack = ({'boxbackup' => $roots });
+my $stringbuf = '';
+$stringbuf .= '[1,0,{"progname":"boxdu","progver":"0.1"},'."\n";
+
+# create new progress bar 
+$progress = Term::ProgressBar->new({name => 'Processing', count => $joblength, ETA => 'linear'});
+$progress->minor(0);
+$progress_nextupdate = 0;
+my $progress_i = 0;
+
+start('json') if $debug;
+while (scalar(@stack)) {
+    if (!$quiet && $progress_i >= $progress_nextupdate) {
+        $progress_nextupdate = $progress->update($progress_i);
+    }
+
+    start('json_pop') if $debug;
+    # take first hash ref from stack
+    my $next = pop(@stack);
+    end('json_pop') if $debug;
+
+    start('json_get') if $debug;
+    # take first (any) key
+    my ($key, undef) = each(%$next);
+    end('json_get') if $debug;
+
+    if (!$key) {
+        start('json_final') if $debug;
+        # Remove last comma from output
+        # (Note: regexp are too slow for this)
+        if (substr($stringbuf, -2) eq ",\n") {
+            chop($stringbuf);
+            chop($stringbuf);
+        }
+
+        # Flush output to reduce memory usage
+        print $outputfh $stringbuf;
+        $stringbuf = "],\n";
+        end('json_final') if $debug;
+        next;
+    }
+
+    start('json_save') if $debug;
+    # save children
+    my $sub = $next->{$key};
+    end('json_save') if $debug;
+
+    start('json_del') if $debug;
+    # delete key
+    delete($next->{$key});
+    end('json_del') if $debug;
+
+    start('json_push') if $debug;
+    # put hash ref back of stack
+    push(@stack, $next);
+    end('json_push') if $debug;
+
+    # print key
+    if (ref($sub) ne 'HASH') {
+        # leaf found, print size
+        $stringbuf .= '{"name":"'.$key.'","dsize":'.$sub.'},'."\n";
+    } else {
+        $stringbuf .= '[{"name":"'.$key.'"},'."\n";
+        # put children on stack
+        push(@stack, $sub);
+    }
+
+    $progress_i++;
+}
+end('json') if $debug;
+
+$progress->update($joblength) unless $quiet;
+
+if ($debug) {
+    print STDERR "Execution times:\n";
+    for my $section (reverse sort { $times->{$a} <=> $times->{$b} } keys(%$times)) {
+        printf("%.2f  %s\n", $times->{$section}, $section);
+    }
+}
+
+# remove last comma from output
+$stringbuf =~ s/,(\s*)$//;
+
+print $outputfh $stringbuf;
+close($outputfh);
+
+# The flags DIsplayed in boxbackup's list command are as follows:
+# f = file
+# d = directory
+# X = deleted
+# o = old version
+# R = remove from server as soon as marked deleted or old
+# a = has attributes stored in directory record which override attributes in backup file
