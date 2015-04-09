@@ -6,6 +6,9 @@ use Getopt::Long qw(:config require_order pass_through bundling);
 use JSON;
 use Term::ProgressBar;
 use Time::HiRes;
+use File::Temp;
+use File::Spec::Functions qw(catfile);
+use POSIX qw(mkfifo);
 
 sub print_usage {
     my $message = $_[0];
@@ -29,8 +32,11 @@ To execute `bbackupquery', boxdu usually requires to be run with root
 privileges. This is not the case if an input file containing a previously
 created file listing is provided.
 
-If a JSON export is requested using --output, `ncdu' will not be executed. Use `ncdu
--f <OUTPUT>' to examine the exported data.
+If a JSON export is requested using --output, `ncdu' will not be executed.
+Use `ncdu -f <OUTPUT>' to examine the exported data.
+
+Set environment variables BOXDU_BBACKUPQUERY or BOXDU_NCDU to override default
+binary paths to bbackupquery or ncdu respectively.
 
 Available options:
     -o FILE, --output FILE      Export JSON data to FILE
@@ -85,7 +91,8 @@ if (defined($ARGV[0])) {
     }
 } else {
     # No input specified, run bbackupquery ourselves
-    my @cmd = ('/usr/sbin/bbackupquery',  'list -r -d -o -s', 'quit');
+    my $querybin = defined($ENV{BOXDU_BBACKUPQUERY}) ? $ENV{BOXDU_BBACKUPQUERY} : '/usr/sbin/bbackupquery';
+    my @cmd = ($querybin,  'list -r -d -o -s', 'quit');
     verbose("Running command: " . join(' ', @cmd) . "\n");
     open($inputfh, '-|', @cmd)
         or die("Failed to run bbackupquery");
@@ -208,7 +215,10 @@ for (my $i = 0; $i <= $#filelist; $i++) {
 }
 end('parse') if $debug;
 
-$progress->update($joblength) unless $quiet;
+unless ($quiet) {
+    $progress->update($joblength);
+    print("\n");
+}
 
 my $cachetotal = $cachehits + $cachemisses;
 printf("Path cache hits: %.1f%%\n", $cachehits / $cachetotal * 100) if $debug;
@@ -217,16 +227,23 @@ printf("Path cache misses: %.1f%%\n", $cachemisses / $cachetotal * 100) if $debu
 use Data::Dumper;
 
 my $outputfh;
+my $runncdu = 0;
 if (defined($output)) {
     # Write JSON to file
-    verbose("Writing JSON to `$output'\n");
     open($outputfh, '>', $output)
         or die("boxdu: open: $output: $!");
 } else {
-    # Feed JSON to ncdu
-    die("Not implemented yet");
+    # Feed JSON to ncdu via temporary file
+
+    # my $tempdir = File::Temp::tempdir('boxduXXXXXX', CLEANUP => 1);
+    # my $tempfifo = catfile($tempdir, "ncdu");
+    # mkfifo($tempfifo, 0700) or die "boxdu: mkfifo: $tempfifo: $!";
+
+    $runncdu = 1;
+    ($outputfh, $output) = File::Temp::tempfile('/tmp/boxdu.XXXXXX', UNLINK => 1);
 }
 
+verbose("Writing JSON to `$output'\n");
 
 # print tree in JSON format
 my @stack = ({'boxbackup' => $roots });
@@ -292,7 +309,10 @@ while (scalar(@stack)) {
 }
 end('json') if $debug;
 
-$progress->update($joblength) unless $quiet;
+unless ($quiet) {
+    $progress->update($joblength);
+    print("\n");
+}
 
 if ($debug) {
     print STDERR "Execution times:\n";
@@ -307,7 +327,14 @@ $stringbuf =~ s/,(\s*)$//;
 print $outputfh $stringbuf;
 close($outputfh);
 
-# The flags DIsplayed in boxbackup's list command are as follows:
+if ($runncdu) {
+    # Run ncdu
+    my $ncdubin = defined($ENV{BOXDU_NCDU}) ? $ENV{BOXDU_NCDU} : '/usr/bin/ncdu';
+    verbose("Using ncdu binary: $ncdubin\n");
+    system($ncdubin, '-f', $output);
+}
+
+# The flags displayed in boxbackup's list command are as follows:
 # f = file
 # d = directory
 # X = deleted
