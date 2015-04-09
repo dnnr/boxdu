@@ -126,6 +126,13 @@ my $progress = Term::ProgressBar->new({name => 'Parsing', count => $joblength, E
 $progress->minor(0);
 my $progress_nextupdate = 0;
 
+# Use cache to speed up tree traversals
+my $pathcache = {
+    'current' => [],
+    'deleted' => [],
+    'old' => []
+};
+
 start('parse') if $debug;
 for (my $i = 0; $i <= $#filelist; $i++) {
     if (!$quiet && $i >= $progress_nextupdate) {
@@ -137,6 +144,7 @@ for (my $i = 0; $i <= $#filelist; $i++) {
     my ($id, $flags, $size, $path) = split(/ /, $filelist[$i], 4);
     # print "id=$id, flags=$flags, size=$size, path=$path\n";
     my @dirs = split(/\//, $path);
+    my $pathprefix = join('/', @dirs[0..$#dirs - 1]);
 
     my $root = 'current';
     if ($flags =~ /X/) {
@@ -154,16 +162,24 @@ for (my $i = 0; $i <= $#filelist; $i++) {
         next;
     }
 
-    # traverse hash for all but last directory tokens in given path
+    # Traverse hash for all but last directory tokens in given path
     start('traverse') if $debug;
-    my $tmp = $roots->{$root};
-    for (my $d = 0; $d < $#dirs; $d++) {
-        my $dir = $dirs[$d];
-        if (!exists($tmp->{$dir})) {
-            $tmp->{$dir} = {};
+    my $tmp;
+    if (@{$pathcache->{$root}} && $pathprefix eq $pathcache->{$root}->[0]) {
+        $tmp = $pathcache->{$root}->[1];
+    } else {
+        $tmp = $roots->{$root};
+        for (my $d = 0; $d < $#dirs; $d++) {
+            # print("dirs[d] = " . $dirs[$d] . ", tmp=$tmp\n");
+            my $dir = $dirs[$d];
+            if (!exists($tmp->{$dir})) {
+                $tmp->{$dir} = {};
+            }
+            $tmp = $tmp->{$dir};
         }
-        $tmp = $tmp->{$dir};
+        $pathcache->{$root} = [$pathprefix, $tmp];
     }
+
     end('traverse') if $debug;
 
     if (exists($tmp->{$dirs[-1]})) {
