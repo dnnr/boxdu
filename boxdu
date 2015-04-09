@@ -69,8 +69,6 @@ sub end {
     $times->{$_[0]} += Time::HiRes::gettimeofday();
 }
 
-# Obtain file listing from boxbackup server
-my @filelist;
 
 my $input = $ARGV[0];
 my $inputfh;
@@ -93,7 +91,7 @@ if (defined($ARGV[0])) {
         or die("Failed to run bbackupquery");
 }
 
-@filelist = <$inputfh>;
+my @filelist = <$inputfh>;
 close($inputfh);
 
 # Skip well-known header lines in bbackupquery output
@@ -127,11 +125,15 @@ $progress->minor(0);
 my $progress_nextupdate = 0;
 
 # Use cache to speed up tree traversals
+# Note: this simple cache is actually more efficient than additionally storing
+# pointers to all intermediate path components.
 my $pathcache = {
     'current' => [],
     'deleted' => [],
     'old' => []
 };
+my $cachehits = 0;
+my $cachemisses = 0;
 
 start('parse') if $debug;
 for (my $i = 0; $i <= $#filelist; $i++) {
@@ -139,12 +141,12 @@ for (my $i = 0; $i <= $#filelist; $i++) {
         $progress_nextupdate = $progress->update($i);
     }
 
-    # print "filelist: " . $filelist[$i];
+    start('parse_parsing') if $debug;
     chomp($filelist[$i]);
     my ($id, $flags, $size, $path) = split(/ /, $filelist[$i], 4);
-    # print "id=$id, flags=$flags, size=$size, path=$path\n";
     my @dirs = split(/\//, $path);
     my $pathprefix = join('/', @dirs[0..$#dirs - 1]);
+    end('parse_parsing') if $debug;
 
     my $root = 'current';
     if ($flags =~ /X/) {
@@ -153,8 +155,8 @@ for (my $i = 0; $i <= $#filelist; $i++) {
         $root = 'old';
     }
 
-    if ($flags =~ /R/) {
-        print "has flag R: $path\n";
+    if ($debug && $flags =~ /R/) {
+        print STDERR "Unexpected: has flag R: $path\n";
     }
 
     if ($size == 0) {
@@ -163,11 +165,13 @@ for (my $i = 0; $i <= $#filelist; $i++) {
     }
 
     # Traverse hash for all but last directory tokens in given path
-    start('traverse') if $debug;
+    start('parse_traverse') if $debug;
     my $tmp;
     if (@{$pathcache->{$root}} && $pathprefix eq $pathcache->{$root}->[0]) {
         $tmp = $pathcache->{$root}->[1];
+        $cachehits++ if $debug;
     } else {
+        $cachemisses++ if $debug;
         $tmp = $roots->{$root};
         for (my $d = 0; $d < $#dirs; $d++) {
             # print("dirs[d] = " . $dirs[$d] . ", tmp=$tmp\n");
@@ -180,9 +184,10 @@ for (my $i = 0; $i <= $#filelist; $i++) {
         $pathcache->{$root} = [$pathprefix, $tmp];
     }
 
-    end('traverse') if $debug;
+    end('parse_traverse') if $debug;
 
-    if (exists($tmp->{$dirs[-1]})) {
+    # Only check input sanity if debugging is enabled
+    if ($debug && exists($tmp->{$dirs[-1]})) {
         if (ref($tmp->{$dirs[-1]}) eq 'HASH') {
             print STDERR "Hash reference unexpectedly found a leaf node in tree '$root': $path\n";
             next;
@@ -191,17 +196,24 @@ for (my $i = 0; $i <= $#filelist; $i++) {
             print STDERR "Path collision with previously seen file in tree '$root': $path\n";
             next;
         }
-    } else {
-        # initialize
-        $tmp->{$dirs[-1]} = 0;
     }
+
+    # Note: Initialization not necessary thanks to autovivification
+    # if (!exists($tmp->{$dirs[-1]})) {
+        #$tmp->{$dirs[-1]} = 0;
+    # }
 
     # leaf node points to file size (build cumulative sum in case of deleted or old versions)  
     $tmp->{$dirs[-1]} += $size * 4096;
 }
-
 end('parse') if $debug;
+
 $progress->update($joblength) unless $quiet;
+
+my $cachetotal = $cachehits + $cachemisses;
+printf("Path cache hits: %.1f%%\n", $cachehits / $cachetotal * 100) if $debug;
+printf("Path cache misses: %.1f%%\n", $cachemisses / $cachetotal * 100) if $debug;
+
 use Data::Dumper;
 
 my $outputfh;
@@ -233,18 +245,15 @@ while (scalar(@stack)) {
         $progress_nextupdate = $progress->update($progress_i);
     }
 
-    start('json_pop') if $debug;
+    start('json_popget') if $debug;
     # take first hash ref from stack
     my $next = pop(@stack);
-    end('json_pop') if $debug;
 
-    start('json_get') if $debug;
     # take first (any) key
     my ($key, undef) = each(%$next);
-    end('json_get') if $debug;
+    end('json_popget') if $debug;
 
     if (!$key) {
-        start('json_final') if $debug;
         # Remove last comma from output
         # (Note: regexp are too slow for this)
         if (substr($stringbuf, -2) eq ",\n") {
@@ -255,24 +264,19 @@ while (scalar(@stack)) {
         # Flush output to reduce memory usage
         print $outputfh $stringbuf;
         $stringbuf = "],\n";
-        end('json_final') if $debug;
         next;
     }
 
-    start('json_save') if $debug;
+    start('json_savedelpush') if $debug;
     # save children
     my $sub = $next->{$key};
-    end('json_save') if $debug;
 
-    start('json_del') if $debug;
     # delete key
     delete($next->{$key});
-    end('json_del') if $debug;
 
-    start('json_push') if $debug;
     # put hash ref back of stack
     push(@stack, $next);
-    end('json_push') if $debug;
+    end('json_savedelpush') if $debug;
 
     # print key
     if (ref($sub) ne 'HASH') {
