@@ -127,9 +127,12 @@ my $roots = {
 };
 
 my $joblength = $#filelist;
-my $progress = Term::ProgressBar->new({name => 'Parsing', count => $joblength, ETA => 'linear'});
-$progress->minor(0);
-my $progress_nextupdate = 0;
+my $progress;
+unless ($quiet) {
+    $progress = Term::ProgressBar->new({name => 'Parsing', count => $joblength, ETA => 'linear'});
+    $progress->minor(0);
+}
+    my $progress_nextupdate = 0;
 
 # Use cache to speed up tree traversals
 # Note: this simple cache is actually more efficient than additionally storing
@@ -251,8 +254,10 @@ my $stringbuf = '';
 $stringbuf .= '[1,0,{"progname":"boxdu","progver":"0.1"},'."\n";
 
 # create new progress bar 
-$progress = Term::ProgressBar->new({name => 'Processing', count => $joblength, ETA => 'linear'});
-$progress->minor(0);
+unless ($quiet) {
+    $progress = Term::ProgressBar->new({name => 'Processing', count => $joblength, ETA => 'linear'});
+    $progress->minor(0);
+}
 $progress_nextupdate = 0;
 my $progress_i = 0;
 
