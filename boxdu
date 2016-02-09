@@ -123,6 +123,7 @@ veriline(\@filelist, '^$', $linenum++);
 my $roots = {
     'current' => {},
     'deleted' => {},
+    'unclear' => {},
     'old' => {}
 };
 
@@ -140,6 +141,7 @@ unless ($quiet) {
 my $pathcache = {
     'current' => [],
     'deleted' => [],
+    'unclear' => [],
     'old' => []
 };
 my $cachehits = 0;
@@ -161,6 +163,8 @@ for (my $i = 0; $i <= $#filelist; $i++) {
     my $root = 'current';
     if ($flags =~ /X/) {
         $root = 'deleted';
+    } elsif ($flags =~ /a/) {
+        $root = 'unclear';
     } elsif ($flags =~ /o/) {
         $root = 'old';
     }
@@ -345,4 +349,4 @@ if ($runncdu) {
 # X = deleted
 # o = old version
 # R = remove from server as soon as marked deleted or old
-# a = has attributes stored in directory record which override attributes in backup file
+# a = has attributes stored in directory record which override attributes in backup file (can't know what their real status is)
