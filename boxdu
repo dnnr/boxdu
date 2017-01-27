@@ -3,7 +3,6 @@
 use strict;
 use warnings;
 use Getopt::Long qw(:config require_order pass_through bundling);
-use JSON;
 use Term::ProgressBar;
 use Time::HiRes;
 use File::Temp;
