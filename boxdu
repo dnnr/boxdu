@@ -304,7 +304,8 @@ while (scalar(@stack)) {
     push(@stack, $next);
     end('json_savedelpush') if $debug;
 
-    # print key
+    # print key (sanitized for JSON)
+    $key =~ s%(["\\])%\\$1%g;
     if (ref($sub) ne 'HASH') {
         # leaf found, print size
         $stringbuf .= '{"name":"'.$key.'","dsize":'.$sub.'},'."\n";
